@@ -5150,6 +5150,7 @@ final class VL_License_Manager {
             if (!is_array($raw_server)) {
                 continue;
             }
+        }
 
             $normalized = self::liquidweb_normalize_record($raw_server, array(), 'server');
             if ($normalized === null) {
@@ -5157,6 +5158,7 @@ final class VL_License_Manager {
             } else {
                 $uniq_id = $normalized['uniq_id'];
             }
+        }
 
             if (($normalized === null || self::liquidweb_record_incomplete($normalized)) && $uniq_id !== '') {
                 $cache_key = 'server:' . $uniq_id;
