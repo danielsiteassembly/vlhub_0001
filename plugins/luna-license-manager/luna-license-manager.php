@@ -5524,6 +5524,41 @@ final class VL_License_Manager {
                 }
                 $details_cache[$uniq_id] = $detail;
             }
+        }
+
+        return 1;
+    }
+
+    private static function liquidweb_pick_string($values) {
+        if (!is_array($values)) {
+            $values = array($values);
+        }
+
+        foreach ($values as $value) {
+            if (!is_string($value)) {
+                continue;
+            }
+
+            $trimmed = trim($value);
+            if ($trimmed !== '') {
+                return $trimmed;
+            }
+        }
+
+        return '';
+    }
+
+    private static function liquidweb_normalize_record($record, $source) {
+        if (!is_array($record)) {
+            return array();
+        }
+
+        $uniq_id = self::liquidweb_pick_string(array(
+            $record['uniq_id'] ?? null,
+            $record['uniqid'] ?? null,
+            $record['id'] ?? null,
+            $record['metadata']['uniq_id'] ?? null,
+        ));
 
             if ($normalized !== null) {
                 $assets_map[$normalized['uniq_id']] = $normalized;
@@ -5639,7 +5674,7 @@ final class VL_License_Manager {
             'message' => 'Successfully synced ' . count($asset_values) . ' Liquid Web assets',
         );
     }
-    
+
     /**
      * Sync Cloudflare data for a license
      */
