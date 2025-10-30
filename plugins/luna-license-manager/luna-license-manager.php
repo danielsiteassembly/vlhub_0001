@@ -4477,7 +4477,7 @@ final class VL_License_Manager {
      */
     public static function liquidweb_api_handler($license_key, $endpoint, $params = array()) {
         $settings = get_option('vl_liquidweb_settings_' . $license_key, array());
-        
+
         if (empty($settings['api_key']) || empty($settings['account_number'])) {
             return new WP_Error('liquidweb_no_credentials', 'Liquid Web credentials not configured');
         }
@@ -4529,10 +4529,486 @@ final class VL_License_Manager {
             }
             return new WP_Error('liquidweb_api_error', 'Liquid Web API error: ' . $error_message, $code);
         }
-        
+
         return $data;
     }
-    
+
+    private static function liquidweb_is_sequential_array($value) {
+        return is_array($value) && array_values($value) === $value;
+    }
+
+    private static function liquidweb_first_non_empty_string($values) {
+        foreach ($values as $value) {
+            if ($value === null) {
+                continue;
+            }
+
+            if (is_string($value) || is_numeric($value)) {
+                $string = trim((string) $value);
+                if ($string !== '') {
+                    return $string;
+                }
+                continue;
+            }
+
+            if (is_bool($value)) {
+                return $value ? 'true' : 'false';
+            }
+
+            if (is_array($value)) {
+                $queue = array($value);
+                $collected = array();
+                while (!empty($queue)) {
+                    $current = array_shift($queue);
+                    if (is_array($current)) {
+                        foreach ($current as $item) {
+                            $queue[] = $item;
+                        }
+                        continue;
+                    }
+
+                    if (is_string($current) || is_numeric($current)) {
+                        $string = trim((string) $current);
+                        if ($string !== '') {
+                            $collected[] = $string;
+                        }
+                    }
+                }
+
+                if (!empty($collected)) {
+                    return implode(' / ', array_unique($collected));
+                }
+            }
+        }
+
+        return '';
+    }
+
+    private static function liquidweb_extract_items($response) {
+        if (!is_array($response)) {
+            return array();
+        }
+
+        $candidates = array(
+            $response['items'] ?? null,
+            $response['result']['items'] ?? null,
+            $response['data']['items'] ?? null,
+            $response['result'] ?? null,
+            $response['data'] ?? null,
+            $response['assets'] ?? null,
+            $response['servers'] ?? null,
+            $response['domains'] ?? null,
+            $response
+        );
+
+        foreach ($candidates as $candidate) {
+            if (!is_array($candidate)) {
+                continue;
+            }
+
+            if (!self::liquidweb_is_sequential_array($candidate)) {
+                $candidate = array_values($candidate);
+            }
+
+            $candidate = array_values(array_filter($candidate, 'is_array'));
+            if (!empty($candidate)) {
+                return $candidate;
+            }
+        }
+
+        return array();
+    }
+
+    private static function liquidweb_calculate_page_total($response, $page_size) {
+        $page_total_candidates = array(
+            $response['page_total'] ?? null,
+            $response['result']['page_total'] ?? null,
+            $response['data']['page_total'] ?? null,
+            $response['pagination']['total_pages'] ?? null
+        );
+
+        foreach ($page_total_candidates as $candidate) {
+            if (is_numeric($candidate) && intval($candidate) > 0) {
+                return intval($candidate);
+            }
+        }
+
+        $item_total_candidates = array(
+            $response['item_total'] ?? null,
+            $response['result']['item_total'] ?? null,
+            $response['data']['item_total'] ?? null,
+            $response['item_count'] ?? null,
+            $response['result']['item_count'] ?? null,
+            $response['data']['item_count'] ?? null
+        );
+
+        foreach ($item_total_candidates as $candidate) {
+            if (is_numeric($candidate) && intval($candidate) > 0 && $page_size > 0) {
+                return max(1, (int) ceil(intval($candidate) / $page_size));
+            }
+        }
+
+        return 1;
+    }
+
+    private static function liquidweb_fetch_paginated($license_key, $endpoint, $params = array(), $page_size = 200) {
+        $items = array();
+        $page_num = 1;
+        $page_total = 1;
+
+        do {
+            $response = self::liquidweb_api_handler($license_key, $endpoint, array_merge($params, array(
+                'page_num' => $page_num,
+                'page_size' => $page_size
+            )));
+
+            if (is_wp_error($response)) {
+                return $response;
+            }
+
+            $page_items = self::liquidweb_extract_items($response);
+            if (!empty($page_items)) {
+                foreach ($page_items as $item) {
+                    $items[] = $item;
+                }
+            }
+
+            $page_total = self::liquidweb_calculate_page_total($response, $page_size);
+            $page_num++;
+        } while ($page_num <= $page_total);
+
+        return $items;
+    }
+
+    private static function liquidweb_extract_detail($response) {
+        if (!is_array($response)) {
+            return array();
+        }
+
+        $candidates = array(
+            $response['item'] ?? null,
+            $response['result']['item'] ?? null,
+            $response['result'] ?? null,
+            $response['data']['item'] ?? null,
+            $response['data'] ?? null,
+            $response['asset'] ?? null,
+            $response['server'] ?? null,
+            $response['details'] ?? null,
+            $response
+        );
+
+        foreach ($candidates as $candidate) {
+            if (!is_array($candidate)) {
+                continue;
+            }
+
+            if (isset($candidate['item']) && is_array($candidate['item'])) {
+                return $candidate['item'];
+            }
+
+            if (isset($candidate['asset']) && is_array($candidate['asset'])) {
+                return $candidate['asset'];
+            }
+
+            if (isset($candidate['server']) && is_array($candidate['server'])) {
+                return $candidate['server'];
+            }
+
+            if (isset($candidate['details']) && is_array($candidate['details'])) {
+                return $candidate['details'];
+            }
+
+            return $candidate;
+        }
+
+        return array();
+    }
+
+    private static function liquidweb_fetch_details($license_key, $endpoint, $uniq_id, $alsowith = array()) {
+        if (!is_string($uniq_id) || trim($uniq_id) === '') {
+            return array();
+        }
+
+        $params = array('uniq_id' => $uniq_id);
+        if (!empty($alsowith)) {
+            $params['alsowith'] = $alsowith;
+        }
+
+        $response = self::liquidweb_api_handler($license_key, $endpoint, $params);
+
+        if (is_wp_error($response)) {
+            return $response;
+        }
+
+        return self::liquidweb_extract_detail($response);
+    }
+
+    private static function liquidweb_determine_status($data) {
+        if (!is_array($data)) {
+            return 'active';
+        }
+
+        $candidates = array(
+            $data['status'] ?? null,
+            $data['state'] ?? null,
+            $data['power_state'] ?? null,
+            $data['powerStatus'] ?? null,
+            $data['power_status'] ?? null,
+            $data['lifecycle_state'] ?? null,
+            $data['lifecycleState'] ?? null,
+            $data['server_status'] ?? null
+        );
+
+        if (isset($data['powerStatus']) && is_array($data['powerStatus'])) {
+            $candidates[] = $data['powerStatus']['status'] ?? null;
+            $candidates[] = $data['powerStatus']['state'] ?? null;
+        }
+
+        if (isset($data['status']) && is_array($data['status'])) {
+            $candidates[] = $data['status']['status'] ?? null;
+            $candidates[] = $data['status']['state'] ?? null;
+            $candidates[] = $data['status']['name'] ?? null;
+        }
+
+        if (isset($data['active']) && is_bool($data['active'])) {
+            $candidates[] = $data['active'] ? 'active' : 'inactive';
+        }
+
+        $status = self::liquidweb_first_non_empty_string($candidates);
+
+        if ($status === '') {
+            return 'active';
+        }
+
+        $normalized = strtolower($status);
+        if (in_array($normalized, array('active', 'on', 'running', 'online', 'ok', 'enabled', 'ready', 'up'), true)) {
+            return 'active';
+        }
+
+        if (in_array($normalized, array('inactive', 'off', 'stopped', 'offline', 'disabled', 'suspended', 'cancelled', 'canceled', 'terminated', 'down'), true)) {
+            return 'inactive';
+        }
+
+        return $status;
+    }
+
+    private static function liquidweb_record_incomplete($asset) {
+        if (!is_array($asset)) {
+            return true;
+        }
+
+        if (!isset($asset['name']) || $asset['name'] === '' || $asset['name'] === 'Unnamed Asset') {
+            return true;
+        }
+
+        if (!isset($asset['type']) || $asset['type'] === '' || $asset['type'] === 'Unknown') {
+            return true;
+        }
+
+        if (!isset($asset['status']) || $asset['status'] === '') {
+            return true;
+        }
+
+        if (!isset($asset['description']) || trim((string) $asset['description']) === '') {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static function liquidweb_choose_status($current, $candidate) {
+        $current_string = is_string($current) ? trim($current) : '';
+        $candidate_string = is_string($candidate) ? trim($candidate) : '';
+
+        $current_lower = strtolower($current_string);
+        $candidate_lower = strtolower($candidate_string);
+
+        if ($candidate_string === '') {
+            return $current_string !== '' ? $current_string : 'active';
+        }
+
+        if ($current_string === '') {
+            return $candidate_lower === 'active' ? 'active' : $candidate_string;
+        }
+
+        if ($current_lower === 'active' && $candidate_lower !== 'active') {
+            return $candidate_lower === 'inactive' ? 'inactive' : $candidate_string;
+        }
+
+        if ($candidate_lower === 'inactive') {
+            return 'inactive';
+        }
+
+        return $current_string;
+    }
+
+    private static function liquidweb_calculate_health_score($status) {
+        $normalized = strtolower(is_string($status) ? $status : '');
+
+        if (in_array($normalized, array('inactive', 'suspended', 'disabled', 'offline', 'down', 'terminated', 'cancelled', 'canceled'), true)) {
+            return 60.0;
+        }
+
+        if (in_array($normalized, array('maintenance', 'pending', 'provisioning', 'building', 'rebooting'), true)) {
+            return 80.0;
+        }
+
+        return 95.0;
+    }
+
+    private static function liquidweb_normalize_record($record, $details = array(), $source = 'asset') {
+        if (!is_array($record)) {
+            return null;
+        }
+
+        $record_data = is_array($record) ? $record : array();
+        $detail_data = is_array($details) ? $details : array();
+        $merged = array_merge($record_data, $detail_data);
+
+        $uniq_candidates = array(
+            $record_data['uniq_id'] ?? null,
+            $record_data['uniqid'] ?? null,
+            $record_data['id'] ?? null,
+            $record_data['asset_id'] ?? null,
+            $record_data['server_id'] ?? null,
+            $detail_data['uniq_id'] ?? null,
+            $detail_data['uniqid'] ?? null,
+            $detail_data['id'] ?? null,
+            $merged['uniq_id'] ?? null,
+            $merged['uniqid'] ?? null,
+            $merged['id'] ?? null
+        );
+
+        $uniq_id = self::liquidweb_first_non_empty_string($uniq_candidates);
+
+        if ($uniq_id === '' || strtolower($uniq_id) === 'unknown') {
+            return null;
+        }
+
+        $name = self::liquidweb_first_non_empty_string(array(
+            $merged['custom_name'] ?? null,
+            $merged['name'] ?? null,
+            $merged['hostname'] ?? null,
+            $merged['label'] ?? null,
+            $merged['domain'] ?? null,
+            $merged['primary_domain'] ?? null,
+            $merged['fqdn'] ?? null,
+            $merged['machine']['hostname'] ?? null,
+            $merged['machine']['name'] ?? null,
+            $merged['machine']['label'] ?? null,
+            $merged['instance']['hostname'] ?? null,
+            $merged['instance']['name'] ?? null,
+            $merged['product']['name'] ?? null,
+            $merged['project_name'] ?? null,
+            $merged['ip'] ?? null
+        ));
+
+        if ($name === '') {
+            $name = 'Unnamed Asset';
+        }
+
+        $type = self::liquidweb_first_non_empty_string(array(
+            $merged['type'] ?? null,
+            $merged['asset_type'] ?? null,
+            $merged['type_class'] ?? null,
+            $merged['product']['type'] ?? null,
+            $merged['product']['class'] ?? null,
+            $merged['primaryProductCategory'] ?? null,
+            $merged['publicProductCategory'] ?? null,
+            $merged['primary_product_category'] ?? null,
+            $merged['public_product_category'] ?? null,
+            $merged['category'] ?? null,
+            $merged['class'] ?? null,
+            $merged['machine']['type'] ?? null,
+            $merged['instance']['type'] ?? null,
+            $merged['plan_id'] ?? null
+        ));
+
+        if ($type === '') {
+            $type = 'Unknown';
+        }
+
+        $status = self::liquidweb_determine_status($merged);
+
+        $description = self::liquidweb_first_non_empty_string(array(
+            $merged['description'] ?? null,
+            $merged['shortDescription'] ?? null,
+            $merged['short_description'] ?? null,
+            $merged['summary'] ?? null,
+            $merged['note'] ?? null,
+            $merged['notes'] ?? null,
+            $merged['product']['description'] ?? null,
+            $merged['project_name'] ?? null
+        ));
+
+        $ip = self::liquidweb_first_non_empty_string(array(
+            $merged['ip'] ?? null,
+            $merged['primary_ip'] ?? null,
+            $merged['ipv4'] ?? null,
+            $merged['ipv6'] ?? null,
+            $merged['public_ip'] ?? null,
+            $merged['public_ipv4'] ?? null,
+            $merged['instance']['ip'] ?? null,
+            $merged['machine']['ip'] ?? null
+        ));
+
+        return array(
+            'uniq_id' => $uniq_id,
+            'type' => $type,
+            'status' => $status,
+            'name' => $name,
+            'description' => $description,
+            'ip' => $ip,
+            'source' => $source,
+            'last_updated' => current_time('mysql'),
+            'details' => array(
+                'source' => $source,
+                'data' => $merged
+            )
+        );
+    }
+
+    private static function liquidweb_merge_asset_records($existing, $incoming) {
+        if (!is_array($existing) || empty($existing)) {
+            return $incoming;
+        }
+
+        if (!is_array($incoming) || empty($incoming)) {
+            return $existing;
+        }
+
+        $existing['last_updated'] = current_time('mysql');
+
+        $string_fields = array('name', 'description', 'ip');
+        foreach ($string_fields as $field) {
+            $current_value = isset($existing[$field]) ? trim((string) $existing[$field]) : '';
+            $incoming_value = isset($incoming[$field]) ? trim((string) $incoming[$field]) : '';
+            if ($incoming_value !== '' && ($current_value === '' || $current_value === 'Unnamed Asset')) {
+                $existing[$field] = $incoming[$field];
+            }
+        }
+
+        if (isset($incoming['type']) && ($existing['type'] === '' || $existing['type'] === 'Unknown')) {
+            $existing['type'] = $incoming['type'];
+        }
+
+        if (isset($incoming['status'])) {
+            $existing['status'] = self::liquidweb_choose_status($existing['status'] ?? '', $incoming['status']);
+        }
+
+        if (!empty($incoming['source'])) {
+            $existing['source'] = $incoming['source'];
+        }
+
+        $existing_details = isset($existing['details']['data']) && is_array($existing['details']['data']) ? $existing['details']['data'] : array();
+        $incoming_details = isset($incoming['details']['data']) && is_array($incoming['details']['data']) ? $incoming['details']['data'] : array();
+
+        $existing['details']['source'] = $existing['details']['source'] ?? $incoming['details']['source'] ?? ($existing['source'] ?? 'asset');
+        $existing['details']['data'] = array_merge($existing_details, $incoming_details);
+
+        return $existing;
+    }
+
     /**
      * Cloudflare API Handler Class
      */
@@ -4972,7 +5448,7 @@ final class VL_License_Manager {
      * Sync Liquid Web assets for a license
      */
     public static function sync_liquidweb_assets($license_key) {
-        $common_alsowith = array(
+        $commonAlsowith = array(
             'product',
             'primaryProductCategory',
             'publicProductCategory',
@@ -4988,133 +5464,170 @@ final class VL_License_Manager {
             'shortDescription',
         );
 
-        $asset_items = self::liquidweb_collect_items($license_key, 'asset/list', array('alsowith' => $common_alsowith));
-        if (is_wp_error($asset_items)) {
-            error_log('[VL Hub] Liquid Web asset/list error: ' . $asset_items->get_error_message());
-            $asset_items = array();
+        $asset_list = self::liquidweb_fetch_paginated($license_key, 'asset/list', array(
+            'alsowith' => $commonAlsowith
+        ));
+
+        $asset_list_error = null;
+        if (is_wp_error($asset_list)) {
+            $asset_list_error = $asset_list;
+            error_log('[VL Hub] Liquid Web asset/list error: ' . $asset_list->get_error_message());
+            $asset_list = array();
         }
 
-        $server_items = self::liquidweb_collect_items($license_key, 'server/list', array('alsowith' => array('powerStatus', 'region', 'machine', 'instance', 'product', 'description', 'shortDescription')));
-        if (is_wp_error($server_items)) {
-            error_log('[VL Hub] Liquid Web server/list error: ' . $server_items->get_error_message());
-            $server_items = array();
+        $serverAlsowith = array('powerStatus', 'region', 'machine', 'instance', 'product', 'description', 'shortDescription');
+        $server_list = self::liquidweb_fetch_paginated($license_key, 'server/list', array(
+            'alsowith' => $serverAlsowith
+        ));
+
+        $server_list_error = null;
+        if (is_wp_error($server_list)) {
+            $server_list_error = $server_list;
+            error_log('[VL Hub] Liquid Web server/list error: ' . $server_list->get_error_message());
+            $server_list = array();
         }
 
-        if (empty($asset_items) && empty($server_items)) {
+        if (empty($asset_list) && empty($server_list)) {
+            if ($asset_list_error instanceof WP_Error) {
+                return $asset_list_error;
+            }
+
+            if ($server_list_error instanceof WP_Error) {
+                return $server_list_error;
+            }
+
             return new WP_Error('liquidweb_no_assets', 'No Liquid Web assets were returned by the API');
         }
 
-        $assets = array();
+        $assets_map = array();
         $details_cache = array();
 
-        foreach ($asset_items as $item) {
-            if (!is_array($item)) {
+        foreach ($asset_list as $raw_asset) {
+            if (!is_array($raw_asset)) {
                 continue;
             }
 
-            $uniq_id = self::liquidweb_pick_string(array($item['uniq_id'] ?? null, $item['uniqid'] ?? null, $item['id'] ?? null));
-            if ($uniq_id === '') {
-                continue;
-            }
+            $normalized = self::liquidweb_normalize_record($raw_asset, array(), 'asset');
+            $uniq_id = $normalized['uniq_id'] ?? self::liquidweb_first_non_empty_string(array($raw_asset['uniq_id'] ?? null, $raw_asset['id'] ?? null, $raw_asset['uniqid'] ?? null));
 
-            if (!isset($details_cache[$uniq_id])) {
-                $detail = self::liquidweb_fetch_details($license_key, 'asset/details', $uniq_id, $common_alsowith);
-                if (is_wp_error($detail)) {
-                    error_log('[VL Hub] Liquid Web asset/details error for ' . $uniq_id . ': ' . $detail->get_error_message());
-                    $detail = array();
+            if (($normalized === null || self::liquidweb_record_incomplete($normalized)) && $uniq_id !== '') {
+                $cache_key = 'asset:' . $uniq_id;
+                if (!array_key_exists($cache_key, $details_cache)) {
+                    $details_cache[$cache_key] = self::liquidweb_fetch_details($license_key, 'asset/details', $uniq_id, $commonAlsowith);
+                }
+
+                $detail_data = $details_cache[$cache_key];
+                if ($detail_data instanceof WP_Error) {
+                    error_log('[VL Hub] Liquid Web asset/details error for ' . $uniq_id . ': ' . $detail_data->get_error_message());
+                } elseif (!empty($detail_data)) {
+                    $normalized = self::liquidweb_normalize_record($raw_asset, $detail_data, 'asset');
                 }
                 $details_cache[$uniq_id] = $detail;
             }
 
-            $normalized = self::liquidweb_normalize_asset_record($item, $details_cache[$uniq_id], 'asset');
-            if (empty($normalized)) {
-                continue;
+            if ($normalized !== null) {
+                $assets_map[$normalized['uniq_id']] = $normalized;
             }
-
-            $assets[$normalized['uniq_id']] = $normalized;
         }
 
-        foreach ($server_items as $item) {
-            if (!is_array($item)) {
+        foreach ($server_list as $raw_server) {
+            if (!is_array($raw_server)) {
                 continue;
             }
+        }
 
-            $uniq_id = self::liquidweb_pick_string(array($item['uniq_id'] ?? null, $item['uniqid'] ?? null, $item['id'] ?? null));
-            if ($uniq_id === '') {
-                continue;
-            }
-
-            if (!isset($details_cache[$uniq_id])) {
-                $detail = self::liquidweb_fetch_details($license_key, 'server/details', $uniq_id, array('powerStatus', 'region', 'machine', 'instance', 'product', 'description', 'shortDescription'));
-                if (is_wp_error($detail)) {
-                    error_log('[VL Hub] Liquid Web server/details error for ' . $uniq_id . ': ' . $detail->get_error_message());
-                    $detail = array();
-                }
-                $details_cache[$uniq_id] = $detail;
-            }
-
-            $normalized = self::liquidweb_normalize_asset_record($item, $details_cache[$uniq_id], 'server');
-            if (empty($normalized)) {
-                continue;
-            }
-
-            if (isset($assets[$normalized['uniq_id']])) {
-                $assets[$normalized['uniq_id']] = self::liquidweb_merge_asset_records($assets[$normalized['uniq_id']], $normalized);
+            $normalized = self::liquidweb_normalize_record($raw_server, array(), 'server');
+            if ($normalized === null) {
+                $uniq_id = self::liquidweb_first_non_empty_string(array($raw_server['uniq_id'] ?? null, $raw_server['id'] ?? null, $raw_server['uniqid'] ?? null));
             } else {
-                $assets[$normalized['uniq_id']] = $normalized;
+                $uniq_id = $normalized['uniq_id'];
             }
         }
 
-        if (empty($assets)) {
-            return new WP_Error('liquidweb_no_assets', 'Liquid Web assets could not be normalised');
+            if (($normalized === null || self::liquidweb_record_incomplete($normalized)) && $uniq_id !== '') {
+                $cache_key = 'server:' . $uniq_id;
+                if (!array_key_exists($cache_key, $details_cache)) {
+                    $details_cache[$cache_key] = self::liquidweb_fetch_details($license_key, 'server/details', $uniq_id, $serverAlsowith);
+                }
+
+                $detail_data = $details_cache[$cache_key];
+                if ($detail_data instanceof WP_Error) {
+                    error_log('[VL Hub] Liquid Web server/details error for ' . $uniq_id . ': ' . $detail_data->get_error_message());
+                } elseif (!empty($detail_data)) {
+                    $normalized = self::liquidweb_normalize_record($raw_server, $detail_data, 'server');
+                }
+            }
+
+            if ($normalized !== null) {
+                if (isset($assets_map[$normalized['uniq_id']])) {
+                    $assets_map[$normalized['uniq_id']] = self::liquidweb_merge_asset_records($assets_map[$normalized['uniq_id']], $normalized);
+                } else {
+                    $assets_map[$normalized['uniq_id']] = $normalized;
+                }
+            }
         }
 
-        $asset_values = array_values($assets);
-        update_option('vl_liquidweb_assets_' . $license_key, $asset_values);
+        $assets = array_values($assets_map);
+
+        usort($assets, function ($a, $b) {
+            $name_a = strtolower($a['name'] ?? '');
+            $name_b = strtolower($b['name'] ?? '');
+            return strcmp($name_a, $name_b);
+        });
+
+        update_option('vl_liquidweb_assets_' . $license_key, $assets);
 
         $settings = get_option('vl_liquidweb_settings_' . $license_key, array());
         $settings['asset_count'] = count($asset_values);
         $settings['last_sync'] = current_time('mysql');
+        $settings['last_sync_breakdown'] = array(
+            'asset_list' => count($asset_list),
+            'server_list' => count($server_list)
+        );
         update_option('vl_liquidweb_settings_' . $license_key, $settings);
 
-        foreach ($asset_values as $asset) {
-            $stream_id = 'liquidweb_' . $asset['uniq_id'];
-            $detail_data = isset($asset['details']['data']) && is_array($asset['details']['data']) ? $asset['details']['data'] : array();
-
-            $source_url = self::liquidweb_pick_string(
-                array(
-                    $detail_data['manage_url'] ?? null,
-                    $detail_data['manageUrl'] ?? null,
-                    $detail_data['url'] ?? null,
-                    $detail_data['server_url'] ?? null,
-                )
-            );
-
-            if ($source_url === '') {
-                $source_url = 'https://my.liquidweb.com/';
+        $streams = self::data_streams_store_get();
+        if (isset($streams[$license_key]) && is_array($streams[$license_key])) {
+            foreach (array_keys($streams[$license_key]) as $stream_id) {
+                if (strpos($stream_id, 'liquidweb_') === 0) {
+                    unset($streams[$license_key][$stream_id]);
+                }
             }
+            self::data_streams_store_set($streams);
+        }
+
+        foreach ($assets as $asset) {
+            $stream_id = 'liquidweb_' . $asset['uniq_id'];
+            $description = self::liquidweb_first_non_empty_string(array(
+                $asset['description'] ?? null,
+                $asset['details']['data']['description'] ?? null,
+                $asset['details']['data']['shortDescription'] ?? null,
+                $asset['details']['data']['short_description'] ?? null,
+                'Liquid Web ' . $asset['type'] . ' asset monitoring'
+            ));
+
+            $status = strtolower($asset['status']);
+            $stream_status = in_array($status, array('active', 'inactive'), true) ? $status : ($status === '' ? 'active' : $asset['status']);
 
             $stream_data = array(
                 'name' => 'Liquid Web Asset: ' . $asset['name'],
-                'description' => $asset['description'] !== '' ? $asset['description'] : 'Liquid Web ' . $asset['type'] . ' asset monitoring',
+                'description' => $description,
                 'categories' => array('infrastructure', 'cloudops'),
                 'health_score' => self::liquidweb_calculate_health_score($asset['status']),
                 'error_count' => 0,
                 'warning_count' => 0,
-                'status' => strtolower($asset['status']) === 'inactive' ? 'inactive' : 'active',
+                'status' => $stream_status,
                 'last_updated' => current_time('mysql'),
                 'liquidweb_asset_id' => $asset['uniq_id'],
                 'liquidweb_asset_type' => $asset['type'],
-                'liquidweb_status' => $asset['status'],
-                'liquidweb_ip' => $asset['ip'],
-                'source_url' => $source_url,
+                'source_url' => 'https://my.liquidweb.com/',
+                'details' => $asset['details'],
                 'metadata' => array(
-                    'plan_id' => $detail_data['plan_id'] ?? ($detail_data['planId'] ?? null),
-                    'region_id' => $detail_data['region_id'] ?? ($detail_data['regionId'] ?? null),
-                    'username' => $detail_data['username'] ?? null,
-                    'domain' => $detail_data['domain'] ?? ($detail_data['hostname'] ?? null),
-                    'template_name' => $detail_data['template_name'] ?? null,
-                ),
+                    'ip' => $asset['ip'],
+                    'status' => $asset['status'],
+                    'type' => $asset['type'],
+                    'source' => $asset['source']
+                )
             );
 
             self::add_data_stream($license_key, $stream_id, $stream_data);
