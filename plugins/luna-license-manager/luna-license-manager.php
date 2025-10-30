@@ -5075,143 +5075,7 @@ final class VL_License_Manager {
         return new WP_Error('lighthouse_not_implemented', 'Lighthouse Insights is powered by the open-source Google Lighthouse project. Direct API integration will be implemented in a future update.');
     }
 
-    private static function liquidweb_collect_items($license_key, $endpoint, $params = array(), $page_size = 100) {
-        $items = array();
-        $page_num = 1;
-        $page_total = 1;
-
-        do {
-            $response = self::liquidweb_api_handler(
-                $license_key,
-                $endpoint,
-                array_merge(
-                    $params,
-                    array(
-                        'page_num'  => $page_num,
-                        'page_size' => $page_size,
-                    )
-                )
-            );
-
-            if (is_wp_error($response)) {
-                return $response;
-            }
-
-            $items = array_merge($items, self::liquidweb_extract_items($response));
-            $page_total = self::liquidweb_extract_page_total($response, $page_size);
-            $page_num++;
-        } while ($page_num <= $page_total);
-
-        return $items;
-    }
-
-    private static function liquidweb_extract_items($response) {
-        if (!is_array($response)) {
-            return array();
-        }
-
-        $candidates = array(
-            $response['items'] ?? null,
-            $response['data']['items'] ?? null,
-            $response['result']['items'] ?? null,
-            $response['result'] ?? null,
-            $response['data'] ?? null,
-            $response['assets'] ?? null,
-            $response['servers'] ?? null,
-            $response['domains'] ?? null,
-            $response,
-        );
-
-        foreach ($candidates as $candidate) {
-            if (!is_array($candidate)) {
-                continue;
-            }
-
-            if ($candidate === array_values($candidate)) {
-                return $candidate;
-            }
-
-            $values = array_values($candidate);
-            if (!empty($values) && $values === array_values($values)) {
-                return $values;
-            }
-        }
-
-        return array();
-    }
-
-    private static function liquidweb_extract_page_total($response, $page_size) {
-        if (!is_array($response)) {
-            return 1;
-        }
-
-        $page_candidates = array(
-            $response['page_total'] ?? null,
-            $response['result']['page_total'] ?? null,
-            $response['data']['page_total'] ?? null,
-            $response['pagination']['total_pages'] ?? null,
-        );
-
-        foreach ($page_candidates as $candidate) {
-            if (is_numeric($candidate) && intval($candidate) > 0) {
-                return intval($candidate);
-            }
-        }
-
-        $item_candidates = array(
-            $response['item_total'] ?? null,
-            $response['result']['item_total'] ?? null,
-            $response['data']['item_total'] ?? null,
-            $response['item_count'] ?? null,
-            $response['result']['item_count'] ?? null,
-            $response['data']['item_count'] ?? null,
-        );
-
-        foreach ($item_candidates as $candidate) {
-            if (is_numeric($candidate) && intval($candidate) > 0 && $page_size > 0) {
-                return max(1, (int) ceil(intval($candidate) / $page_size));
-            }
-        }
-
-        return 1;
-    }
-
-    private static function liquidweb_fetch_details($license_key, $endpoint, $uniq_id, $alsowith = array()) {
-        if (!is_string($uniq_id) || trim($uniq_id) === '') {
-            return array();
-        }
-
-        $params = array('uniq_id' => $uniq_id);
-        if (!empty($alsowith)) {
-            $params['alsowith'] = $alsowith;
-        }
-
-        $response = self::liquidweb_api_handler($license_key, $endpoint, $params);
-
-        if (is_wp_error($response)) {
-            return $response;
-        }
-
-        $detail_candidates = array(
-            $response['item'] ?? null,
-            $response['result']['item'] ?? null,
-            $response['result'] ?? null,
-            $response['data']['item'] ?? null,
-            $response['data'] ?? null,
-            $response['asset'] ?? null,
-            $response['server'] ?? null,
-            $response['details'] ?? null,
-            $response,
-        );
-
-        foreach ($detail_candidates as $candidate) {
-            if (is_array($candidate) && !empty($candidate)) {
-                return $candidate;
-            }
-        }
-
-        return array();
-    }
+    
 
     private static function liquidweb_pick_string($values) {
         if (!is_array($values)) {
@@ -5388,61 +5252,8 @@ final class VL_License_Manager {
         );
     }
 
-    private static function liquidweb_merge_asset_records($current, $incoming) {
-        if (empty($current)) {
-            return $incoming;
-        }
+    
 
-        if (empty($incoming)) {
-            return $current;
-        }
-
-        $merged = $current;
-
-        $string_fields = array('name', 'description', 'ip');
-        foreach ($string_fields as $field) {
-            $existing = isset($merged[$field]) ? trim((string) $merged[$field]) : '';
-            $candidate = isset($incoming[$field]) ? trim((string) $incoming[$field]) : '';
-
-            if ($candidate !== '' && ($existing === '' || $existing === 'Unnamed Asset')) {
-                $merged[$field] = $incoming[$field];
-            }
-        }
-
-        if (isset($incoming['type']) && (!isset($merged['type']) || $merged['type'] === '' || $merged['type'] === 'Unknown')) {
-            $merged['type'] = $incoming['type'];
-        }
-
-        if (isset($incoming['status'])) {
-            $merged['status'] = $incoming['status'];
-        }
-
-        if (!empty($incoming['source'])) {
-            $merged['source'] = $incoming['source'];
-        }
-
-        $merged['last_updated'] = current_time('mysql');
-
-        $current_details = isset($merged['details']['data']) && is_array($merged['details']['data']) ? $merged['details']['data'] : array();
-        $incoming_details = isset($incoming['details']['data']) && is_array($incoming['details']['data']) ? $incoming['details']['data'] : array();
-        $merged['details']['data'] = array_replace_recursive($current_details, $incoming_details);
-        $merged['details']['source'] = $incoming['details']['source'] ?? ($merged['details']['source'] ?? $merged['source']);
-
-        return $merged;
-    }
-
-    private static function liquidweb_calculate_health_score($status) {
-        $value = strtolower((string) $status);
-        if (in_array($value, array('inactive', 'suspended', 'powered off', 'disabled'), true)) {
-            return 65.0;
-        }
-
-        if (in_array($value, array('warning', 'maintenance'), true)) {
-            return 80.0;
-        }
-
-        return 95.0;
-    }
     
     /**
      * Sync Liquid Web assets for a license
@@ -5522,54 +5333,14 @@ final class VL_License_Manager {
                 } elseif (!empty($detail_data)) {
                     $normalized = self::liquidweb_normalize_record($raw_asset, $detail_data, 'asset');
                 }
-                $details_cache[$uniq_id] = $detail;
             }
         }
-
-        return 1;
-    }
-
-    private static function liquidweb_pick_string($values) {
-        if (!is_array($values)) {
-            $values = array($values);
-        }
-
-        foreach ($values as $value) {
-            if (!is_string($value)) {
-                continue;
-            }
-
-            $trimmed = trim($value);
-            if ($trimmed !== '') {
-                return $trimmed;
-            }
-        }
-
-        return '';
-    }
-
-    private static function liquidweb_normalize_record($record, $source) {
-        if (!is_array($record)) {
-            return array();
-        }
-
-        $uniq_id = self::liquidweb_pick_string(array(
-            $record['uniq_id'] ?? null,
-            $record['uniqid'] ?? null,
-            $record['id'] ?? null,
-            $record['metadata']['uniq_id'] ?? null,
-        ));
-
-            if ($normalized !== null) {
-                $assets_map[$normalized['uniq_id']] = $normalized;
-            }
-        }
+        
 
         foreach ($server_list as $raw_server) {
             if (!is_array($raw_server)) {
                 continue;
             }
-        }
 
             $normalized = self::liquidweb_normalize_record($raw_server, array(), 'server');
             if ($normalized === null) {
@@ -5577,7 +5348,6 @@ final class VL_License_Manager {
             } else {
                 $uniq_id = $normalized['uniq_id'];
             }
-        }
 
             if (($normalized === null || self::liquidweb_record_incomplete($normalized)) && $uniq_id !== '') {
                 $cache_key = 'server:' . $uniq_id;
@@ -5613,7 +5383,7 @@ final class VL_License_Manager {
         update_option('vl_liquidweb_assets_' . $license_key, $assets);
 
         $settings = get_option('vl_liquidweb_settings_' . $license_key, array());
-        $settings['asset_count'] = count($asset_values);
+        $settings['asset_count'] = count($assets);
         $settings['last_sync'] = current_time('mysql');
         $settings['last_sync_breakdown'] = array(
             'asset_list' => count($asset_list),
@@ -5670,10 +5440,12 @@ final class VL_License_Manager {
 
         return array(
             'success' => true,
-            'assets_synced' => count($asset_values),
-            'message' => 'Successfully synced ' . count($asset_values) . ' Liquid Web assets',
+            'assets_synced' => count($assets),
+            'message' => 'Successfully synced ' . count($assets) . ' Liquid Web assets',
         );
     }
+
+    
 
     /**
      * Sync Cloudflare data for a license
@@ -5682,7 +5454,7 @@ final class VL_License_Manager {
         $settings = get_option('vl_cloudflare_settings_' . $license_key, array());
         
         // Get account information
-        $account_response = self::cloudflare_api_handler($license_key, 'accounts/' . $settings['account_id'] ?? '');
+        $account_response = self::cloudflare_api_handler($license_key, 'accounts/' . ($settings['account_id'] ?? ''));
         
         if (is_wp_error($account_response)) {
             return $account_response;
@@ -11661,7 +11433,7 @@ add_action('wp_ajax_vl_view_s3_objects', function() {
         
         foreach ($objects as $object) {
             $key = $object['Key'] ?? '';
-            $size = isset($object['Size']) ? self::format_bytes($object['Size']) : 'N/A';
+            $size = isset($object['Size']) ? format_bytes($object['Size']) : 'N/A';
             $last_modified = isset($object['LastModified']) ? date('Y-m-d H:i:s', strtotime($object['LastModified'])) : 'N/A';
             $storage_class = $object['StorageClass'] ?? 'STANDARD';
             
@@ -11726,8 +11498,8 @@ function get_competitor_reports($license_key) {
     global $wpdb;
     $table_name = $wpdb->prefix . 'vl_competitor_reports';
     
-    // Check if table exists
-    $table_exists = $wpdb->get_var("SHOW TABLES LIKE '$table_name'");
+    // Check if table exists (safely)
+    $table_exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table_name));
     if (!$table_exists) {
         return array();
     }
@@ -11785,6 +11557,12 @@ function analyze_competitor($license_key, $competitor_url) {
     global $wpdb;
     $table_name = $wpdb->prefix . 'vl_competitor_reports';
     
+    // Normalize and validate URL
+    $competitor_url = esc_url_raw($competitor_url);
+    if (empty($competitor_url)) {
+        return new WP_Error('invalid_url', 'Competitor URL is invalid');
+    }
+    
     // Create table if it doesn't exist
     create_competitor_reports_table();
     
@@ -11806,6 +11584,8 @@ function analyze_competitor($license_key, $competitor_url) {
     // 1. Fetch basic site info
     $response = wp_remote_get($competitor_url, array(
         'timeout' => 30,
+        'redirection' => 5,
+        'sslverify' => false,
         'user-agent' => 'Mozilla/5.0 (compatible; VL Hub Competitor Analysis)'
     ));
     
@@ -11850,6 +11630,16 @@ function analyze_competitor($license_key, $competitor_url) {
     }
     
     // 4. Extract meta information from homepage
+    if (!class_exists('DOMDocument')) {
+        $wpdb->update(
+            $table_name,
+            array('status' => 'error'),
+            array('license_key' => $license_key, 'competitor_url' => $competitor_url),
+            array('%s'),
+            array('%s', '%s')
+        );
+        return new WP_Error('missing_extension', 'PHP DOM extension is required');
+    }
     $document = new DOMDocument();
     @$document->loadHTML($body);
     $xpath = new DOMXPath($document);
@@ -12014,6 +11804,21 @@ function extract_keyphrases($text) {
     }
     
     return $keyphrases;
+}
+
+// Byte size formatter used by S3 UI and elsewhere
+if (!function_exists('format_bytes')) {
+function format_bytes($bytes, $precision = 2) {
+    $bytes = (float) $bytes;
+    if ($bytes < 0) {
+        $bytes = 0;
+    }
+    $units = array('B','KB','MB','GB','TB','PB');
+    $pow = $bytes > 0 ? floor(log($bytes, 1024)) : 0;
+    $pow = min($pow, count($units) - 1);
+    $bytes /= (1 << (10 * $pow));
+    return round($bytes, $precision) . ' ' . $units[$pow];
+}
 }
 
 /**
