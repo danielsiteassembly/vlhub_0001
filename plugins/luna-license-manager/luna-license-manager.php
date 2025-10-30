@@ -4570,197 +4570,6 @@ final class VL_License_Manager {
         return '';
     }
 
-    private static function liquidweb_collect_values_by_keys($data, $keys) {
-        $collected = array();
-
-        if (!is_array($data) || empty($data) || empty($keys)) {
-            return $collected;
-        }
-
-        foreach ($data as $key => $value) {
-            if (in_array($key, $keys, true)) {
-                $collected[] = $value;
-            }
-
-            if (is_array($value)) {
-                $collected = array_merge($collected, self::liquidweb_collect_values_by_keys($value, $keys));
-            }
-        }
-
-        return $collected;
-    }
-
-    private static function liquidweb_generate_surrogate_id($data) {
-        if (!is_array($data) || empty($data)) {
-            return '';
-        }
-
-        $identity_bits = array();
-
-        $identity_bits[] = self::liquidweb_first_non_empty_string(array(
-            $data['uniq_id'] ?? null,
-            $data['uniqid'] ?? null,
-            $data['id'] ?? null,
-            $data['asset_id'] ?? null,
-            $data['server_id'] ?? null,
-            $data['machine']['id'] ?? null,
-            $data['instance']['id'] ?? null,
-            $data['metadata']['id'] ?? null
-        ));
-
-        $identity_bits[] = self::liquidweb_first_non_empty_string(array(
-            $data['hostname'] ?? null,
-            $data['custom_name'] ?? null,
-            $data['domain'] ?? null,
-            $data['name'] ?? null
-        ));
-
-        $identity_bits[] = self::liquidweb_first_non_empty_string(array(
-            $data['ip'] ?? null,
-            $data['primary_ip'] ?? null,
-            $data['ipv4'] ?? null,
-            $data['ipv6'] ?? null
-        ));
-
-        $identity_bits = array_filter($identity_bits, function ($bit) {
-            return is_string($bit) && $bit !== '';
-        });
-
-        $fingerprint_source = '';
-
-        if (!empty($identity_bits)) {
-            $fingerprint_source = implode('|', $identity_bits);
-        } else {
-            $fingerprint_source = wp_json_encode($data);
-        }
-
-        if (!is_string($fingerprint_source) || $fingerprint_source === '') {
-            return '';
-        }
-
-        return 'surrogate_' . substr(md5($fingerprint_source), 0, 12);
-    }
-
-    private static function liquidweb_build_basic_asset($data, $source = 'asset') {
-        if (!is_array($data)) {
-            return null;
-        }
-
-        $id_candidates = self::liquidweb_collect_values_by_keys($data, array('uniq_id', 'uniqid', 'id', 'asset_id', 'server_id', 'resource_id', 'unique_id'));
-        $uniq_id = self::liquidweb_first_non_empty_string($id_candidates);
-
-        if ($uniq_id === '' || strtolower($uniq_id) === 'unknown') {
-            $uniq_id = self::liquidweb_generate_surrogate_id($data);
-        }
-
-        if ($uniq_id === '') {
-            return null;
-        }
-
-        $name = self::liquidweb_first_non_empty_string(array(
-            $data['custom_name'] ?? null,
-            $data['name'] ?? null,
-            $data['hostname'] ?? null,
-            $data['label'] ?? null,
-            $data['domain'] ?? null,
-            $data['primary_domain'] ?? null,
-            $data['fqdn'] ?? null,
-            $data['machine']['hostname'] ?? null,
-            $data['instance']['hostname'] ?? null
-        ));
-
-        if ($name === '') {
-            $name = 'Liquid Web Asset ' . substr($uniq_id, 0, 8);
-        }
-
-        $type = self::liquidweb_first_non_empty_string(array(
-            $data['type'] ?? null,
-            $data['asset_type'] ?? null,
-            $data['type_class'] ?? null,
-            $data['product']['type'] ?? null,
-            $data['product']['class'] ?? null,
-            $data['primaryProductCategory'] ?? null,
-            $data['publicProductCategory'] ?? null,
-            $data['category'] ?? null,
-            $data['class'] ?? null,
-            $data['machine']['type'] ?? null,
-            $data['instance']['type'] ?? null
-        ));
-
-        if ($type === '') {
-            $type = $source === 'server' ? 'Server' : 'Asset';
-        }
-
-        $description = self::liquidweb_first_non_empty_string(array(
-            $data['description'] ?? null,
-            $data['shortDescription'] ?? null,
-            $data['short_description'] ?? null,
-            $data['summary'] ?? null,
-            $data['note'] ?? null,
-            $data['notes'] ?? null,
-            $data['product']['description'] ?? null,
-            $data['project_name'] ?? null
-        ));
-
-        if ($description === '') {
-            $description = 'Liquid Web ' . $type . ' asset';
-        }
-
-        $ip = self::liquidweb_first_non_empty_string(array(
-            $data['ip'] ?? null,
-            $data['primary_ip'] ?? null,
-            $data['ipv4'] ?? null,
-            $data['ipv6'] ?? null,
-            $data['public_ip'] ?? null,
-            $data['public_ipv4'] ?? null,
-            $data['instance']['ip'] ?? null,
-            $data['machine']['ip'] ?? null
-        ));
-
-        return array(
-            'uniq_id' => $uniq_id,
-            'type' => $type,
-            'status' => self::liquidweb_determine_status($data),
-            'name' => $name,
-            'description' => $description,
-            'ip' => $ip,
-            'source' => $source,
-            'last_updated' => current_time('mysql'),
-            'details' => array(
-                'source' => $source,
-                'data' => $data
-            )
-        );
-    }
-
-    private static function liquidweb_build_source_url($asset) {
-        if (!is_array($asset)) {
-            return 'https://my.liquidweb.com/';
-        }
-
-        $uniq_id = isset($asset['uniq_id']) ? trim((string) $asset['uniq_id']) : '';
-        if ($uniq_id === '') {
-            return 'https://my.liquidweb.com/';
-        }
-
-        $type = strtolower(trim((string) ($asset['type'] ?? '')));
-        $source = strtolower(trim((string) ($asset['source'] ?? '')));
-
-        if ($source === 'server' || strpos($type, 'server') !== false || strpos($type, 'vps') !== false || strpos($type, 'bare') !== false) {
-            return 'https://my.liquidweb.com/servers/' . rawurlencode($uniq_id);
-        }
-
-        if (strpos($type, 'domain') !== false) {
-            return 'https://my.liquidweb.com/domains/' . rawurlencode($uniq_id);
-        }
-
-        if (strpos($type, 'database') !== false) {
-            return 'https://my.liquidweb.com/databases/' . rawurlencode($uniq_id);
-        }
-
-        return 'https://my.liquidweb.com/assets/' . rawurlencode($uniq_id);
-    }
-
     private static function liquidweb_extract_items($response) {
         if (!is_array($response)) {
             return array();
@@ -5056,16 +4865,9 @@ final class VL_License_Manager {
             $merged['id'] ?? null
         );
 
-        $nested_ids = self::liquidweb_collect_values_by_keys($merged, array('uniq_id', 'uniqid', 'id', 'asset_id', 'server_id', 'resource_id', 'unique_id'));
-        $uniq_candidates = array_merge($uniq_candidates, $nested_ids);
-
         $uniq_id = self::liquidweb_first_non_empty_string($uniq_candidates);
 
         if ($uniq_id === '' || strtolower($uniq_id) === 'unknown') {
-            $uniq_id = self::liquidweb_generate_surrogate_id($merged);
-        }
-
-        if ($uniq_id === '') {
             return null;
         }
 
@@ -5324,7 +5126,6 @@ final class VL_License_Manager {
 
             $normalized = self::liquidweb_normalize_record($raw_asset, array(), 'asset');
             $uniq_id = $normalized['uniq_id'] ?? self::liquidweb_first_non_empty_string(array($raw_asset['uniq_id'] ?? null, $raw_asset['id'] ?? null, $raw_asset['uniqid'] ?? null));
-            $detail_data = array();
 
             if (($normalized === null || self::liquidweb_record_incomplete($normalized)) && $uniq_id !== '') {
                 $cache_key = 'asset:' . $uniq_id;
@@ -5340,14 +5141,6 @@ final class VL_License_Manager {
                 }
             }
 
-            if ($normalized === null && !empty($detail_data) && is_array($detail_data)) {
-                $normalized = self::liquidweb_build_basic_asset(array_merge($raw_asset, $detail_data), 'asset');
-            }
-
-            if ($normalized === null) {
-                $normalized = self::liquidweb_build_basic_asset($raw_asset, 'asset');
-            }
-
             if ($normalized !== null) {
                 $assets_map[$normalized['uniq_id']] = $normalized;
             }
@@ -5357,6 +5150,7 @@ final class VL_License_Manager {
             if (!is_array($raw_server)) {
                 continue;
             }
+        }
 
             $normalized = self::liquidweb_normalize_record($raw_server, array(), 'server');
             if ($normalized === null) {
@@ -5364,7 +5158,7 @@ final class VL_License_Manager {
             } else {
                 $uniq_id = $normalized['uniq_id'];
             }
-            $detail_data = array();
+        }
 
             if (($normalized === null || self::liquidweb_record_incomplete($normalized)) && $uniq_id !== '') {
                 $cache_key = 'server:' . $uniq_id;
@@ -5380,39 +5174,11 @@ final class VL_License_Manager {
                 }
             }
 
-            if ($normalized === null && !empty($detail_data) && is_array($detail_data)) {
-                $normalized = self::liquidweb_build_basic_asset(array_merge($raw_server, $detail_data), 'server');
-            }
-
-            if ($normalized === null) {
-                $normalized = self::liquidweb_build_basic_asset($raw_server, 'server');
-            }
-
             if ($normalized !== null) {
                 if (isset($assets_map[$normalized['uniq_id']])) {
                     $assets_map[$normalized['uniq_id']] = self::liquidweb_merge_asset_records($assets_map[$normalized['uniq_id']], $normalized);
                 } else {
                     $assets_map[$normalized['uniq_id']] = $normalized;
-                }
-            }
-        }
-
-        if (empty($assets_map) && (!empty($asset_list) || !empty($server_list))) {
-            foreach ($asset_list as $raw_asset) {
-                $fallback = self::liquidweb_build_basic_asset($raw_asset, 'asset');
-                if ($fallback !== null) {
-                    $assets_map[$fallback['uniq_id']] = $fallback;
-                }
-            }
-
-            foreach ($server_list as $raw_server) {
-                $fallback = self::liquidweb_build_basic_asset($raw_server, 'server');
-                if ($fallback !== null) {
-                    if (isset($assets_map[$fallback['uniq_id']])) {
-                        $assets_map[$fallback['uniq_id']] = self::liquidweb_merge_asset_records($assets_map[$fallback['uniq_id']], $fallback);
-                    } else {
-                        $assets_map[$fallback['uniq_id']] = $fallback;
-                    }
                 }
             }
         }
@@ -5459,8 +5225,6 @@ final class VL_License_Manager {
             $status = strtolower($asset['status']);
             $stream_status = in_array($status, array('active', 'inactive'), true) ? $status : ($status === '' ? 'active' : $asset['status']);
 
-            $detail_payload = is_array($asset['details']['data'] ?? null) ? $asset['details']['data'] : array();
-
             $stream_data = array(
                 'name' => 'Liquid Web Asset: ' . $asset['name'],
                 'description' => $description,
@@ -5472,18 +5236,13 @@ final class VL_License_Manager {
                 'last_updated' => current_time('mysql'),
                 'liquidweb_asset_id' => $asset['uniq_id'],
                 'liquidweb_asset_type' => $asset['type'],
-                'source_url' => self::liquidweb_build_source_url($asset),
+                'source_url' => 'https://my.liquidweb.com/',
                 'details' => $asset['details'],
                 'metadata' => array(
                     'ip' => $asset['ip'],
                     'status' => $asset['status'],
                     'type' => $asset['type'],
-                    'source' => $asset['source'],
-                    'plan_id' => $detail_payload['plan_id'] ?? ($asset['details']['data']['planId'] ?? null),
-                    'region_id' => $detail_payload['region_id'] ?? ($asset['details']['data']['regionId'] ?? null),
-                    'username' => $detail_payload['username'] ?? null,
-                    'domain' => $detail_payload['domain'] ?? null,
-                    'template_name' => $detail_payload['template_name'] ?? null
+                    'source' => $asset['source']
                 )
             );
 
